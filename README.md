@@ -1,28 +1,33 @@
 
+
+---
+
 # Odoo QWeb i18n Fixer
 
 **A CLI tool to refactor Odoo QWeb `t-value` attributes into translatable XML nodes.**
 
-This script automates the tedious process of finding and fixing "untranslatable" strings hidden inside Python expressions in Odoo XML views. It features an interactive TUI (Terminal User Interface) to review candidates and a batch mode to apply safe, AST-based transformations.
+This script automates the tedious process of finding and fixing "untranslatable" strings hidden inside Python expressions in Odoo XML views. It features an interactive TUI (Terminal User Interface) to review candidates, a report generator, and a batch mode to apply safe, AST-based transformations.
 
 ## 🛑 The Problem
 
-In Odoo QWeb views, text inside Python attributes is often invisible to the translation system. Odoo's translation crawler looks for standard XML text nodes or explicit `_()` calls, but it struggles with strings mixed into logic inside `t-value`.
+In Odoo QWeb views, text inside Python attributes (`t-value`, `t-attf-value`) is often invisible to the translation system. Odoo's translation crawler looks for standard XML text nodes or explicit `_()` calls, but it struggles with strings mixed into logic, dictionaries, or lists inside `t-value`.
 
-**Example:**
+**Common Untranslatable Scenarios:**
 
-```xml
-<t t-set="label" t-value="label or 'Proceed to checkout'"/>
+1. **Logic:** `t-value="name or 'New Record'"`
+2. **Dictionaries:** `t-value="{'label': 'Submit', 'icon': 'fa-check'}"`
+3. **Lists/Tuples:** `t-value="[('gift', 'Send a Gift'), ('fund', 'Donate to Fund')]"`
+4. **Concatenation:** `t-value="user.name + ' Profile'"`
 
-```
-
-Because the string is inside a Python expression (`t-value`), it remains hardcoded in English, frustrating international users.
+In all these cases, the strings remain hardcoded in English, creating a poor experience for international users.
 
 ## ✅ The Solution
 
-This tool parses the Python AST (Abstract Syntax Tree) within your XML files. It detects string literals inside logic and refactors the XML structure so that strings become standard text nodes.
+This tool parses the Python AST (Abstract Syntax Tree) within your XML files. It intelligently decides between two strategies to make strings translatable without breaking your code logic.
 
-**Transformation Example:**
+### Strategy 1: XML Body Replacement (for Logic)
+
+For simple strings or boolean logic, it moves the logic into the XML body using `t-if` and `t-else`.
 
 **Before:**
 
@@ -41,22 +46,59 @@ This tool parses the Python AST (Abstract Syntax Tree) within your XML files. It
 
 ```
 
-It handles:
+### Strategy 2: Deep Variable Extraction (for Data Structures)
 
-* **Simple Strings:** `t-value="'Hello'"` → `Hello`
-* **OR Conditions:** `t-value="x or 'Default'"` → `t-if` / `t-else`
-* **Ternary Operators:** `t-value="'A' if x else 'B'"` → `t-if` / `t-else`
+For Dictionaries, Lists, and Concatenations, the tool cannot move the content to the XML body because `t-value` must return a specific Python type (like a `dict` or `list`).
+
+Instead, the tool **extracts the string to a unique XML variable** (creating a text node the scrapper *can* see) and references it in the Python structure.
+
+#### Example: Lists & Tuples
+
+**Before:**
+
+```xml
+<t t-set="options" t-value="[('a', 'Option A'), ('b', 'Option B')]"/>
+
+```
+
+**After:**
+
+```xml
+<t t-set="_txt_Option_A_0">Option A</t>
+<t t-set="_txt_Option_B_1">Option B</t>
+
+<t t-set="options" t-value="[('a', _txt_Option_A_0), ('b', _txt_Option_B_1)]"/>
+
+```
+
+#### Example: String Concatenation
+
+**Before:**
+
+```xml
+<t t-set="full_title" t-value="type + ' Gift'"/>
+
+```
+
+**After:**
+
+```xml
+<t t-set="_txt_Gift_0"> Gift</t>
+<t t-set="full_title" t-value="type + _txt_Gift_0"/>
+
+```
 
 ## 🚀 Features
 
-* **Interactive TUI Mode:** Browse all occurrences in your project with a `htop`-like interface.
-* **Live Preview:** See exactly how the XML line will be transformed.
-* **Search & Filter:** Quickly find keys (e.g., `label`, `title`).
-* **Open in Editor:** Press `ENTER` to jump straight to the code in VS Code, Nano, or Vim.
+* **Interactive TUI Mode:** Browse all occurrences with an `htop`-like interface.
+* **Live Preview:** See exactly how the XML line will be refactored (Extraction vs. Body).
+* **Smart Filtering:** Filters by key (e.g., `label`, `title`, `options`) and uses heuristics to detect human text (ignoring internal IDs).
+* **Open in Editor:** Press `ENTER` to jump straight to the file/line in VS Code, Nano, or Vim.
 
 
-* **Safe AST Parsing:** Uses Python's native `ast` module to ensure it only modifies valid Python expressions, avoiding regex fragility.
-* **Configurable Keys:** Targets specific attributes (e.g., `title`, `label`, `placeholder`, `description`) to avoid breaking logic variables.
+* **Deep AST Inspection:** Recursively searches Python Dictionaries, Lists, and BinOps to find hidden strings.
+* **Smart Variable Naming:** Generates semantic variable names (e.g., `_txt_Save_Changes`) and handles collisions automatically to ensure valid XML.
+* **Report Generation:** Supports piping to files (`> report.txt`) for full project audits. The script detects non-interactive terminals and switches to text-dump mode automatically.
 
 ## 📦 Installation
 
@@ -97,18 +139,28 @@ python3 main.py --list --path /path/to/your/odoo/module
 * `r`: Reset filters
 * `q`: Quit
 
-### 2. Dry Run (Safe Check)
+### 2. Report Mode (File Dump)
 
-Run without flags to scan directories and print what *would* happen without modifying files.
+If you pipe the output, the tool automatically detects non-interactive mode and dumps a clean table of all candidates.
+
+```bash
+# Save a full audit report to a text file
+python3 main.py --list --path . > report.txt
+
+```
+
+### 3. Dry Run (Safe Check)
+
+Run without flags to scan directories and print what *would* happen to the files without modifying them.
 
 ```bash
 python3 main.py --path /path/to/your/odoo/module
 
 ```
 
-### 3. Fix Mode (Apply Changes)
+### 4. Fix Mode (Apply Changes)
 
-Use the `--force` flag to write changes to your files.
+Use the `--force` flag to actually write changes to your files.
 
 ```bash
 python3 main.py --path /path/to/your/odoo/module --force
@@ -117,12 +169,14 @@ python3 main.py --path /path/to/your/odoo/module --force
 
 ## ⚙️ Configuration
 
-You can customize the `KEY_LIST` inside the script to define which `t-set` keys should be targeted. The default list includes common UI strings:
+You can customize the `KEY_LIST` inside the script to define which `t-set` keys should be targeted. The default list includes common UI attributes:
 
 ```python
 KEY_LIST = [
-    "label", "description", "title", "subtitle", 
-    "placeholder", "alt", "button_label", "text", "name"
-]
+    "label", "description", "title", "label_empty", "subtitle", "tooltip_title", 
+    "placeholder", "title_content", "alt", "learn_more_text", "button_label", 
+    "btn_text", "text", "internal_link_label", "invalid_hint", "submit_label",
+    "base_name", "monthly", "name", "primary_button", "cells", "header", "options"
+] 
 
 ```
