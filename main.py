@@ -5,7 +5,7 @@ import ast
 import curses
 import subprocess
 import shutil
-import sys  # Added for isatty check
+import sys
 
 # ANSI colors for terminal output
 GREEN = '\033[92m'
@@ -134,14 +134,32 @@ def process_python_ast(val_str, used_names_set):
     Returns tuple: (result_data, strategy_type)
     strategy_type: 0 (No), 1 (XML Body), 2 (Extraction)
     """
+    val_for_ast = val_str
+    
+    # --- INTELLIGENT MULTI-LINE HANDLING ---
     if '\n' in val_str:
         s_strip = val_str.strip()
-        if not s_strip.startswith('{') and not s_strip.startswith('['):
-             if s_strip.startswith("'") or s_strip.startswith('"'):
-                val_str = val_str.replace('\n', ' ')
+        
+        # Case A: Simple String Literal (e.g. 'Line1\nLine2')
+        # We wrap in triple quotes to make it valid Python for ast.parse
+        if (s_strip.startswith("'") and s_strip.endswith("'")) or \
+           (s_strip.startswith('"') and s_strip.endswith('"')):
+            quote = s_strip[0]
+            if len(s_strip) >= 2 and s_strip[-1] == quote:
+                 # Strip outer quotes and wrap in triple double-quotes to preserve newlines
+                 inner = s_strip[1:-1]
+                 val_for_ast = f'"""{inner}"""'
+        
+        # Case B: Data Structures (Lists/Dicts) - Newlines are valid, do nothing
+        elif s_strip.startswith('{') or s_strip.startswith('['):
+            pass 
+            
+        # Case C: Logic/Math - Flatten newlines to avoid SyntaxErrors
+        else:
+            val_for_ast = val_str.replace('\n', ' ')
 
     try:
-        tree = ast.parse(val_str, mode='eval')
+        tree = ast.parse(val_for_ast, mode='eval')
         body = tree.body
         
         # --- Strategy 2: Extraction ---
@@ -159,6 +177,9 @@ def process_python_ast(val_str, used_names_set):
 
         # --- Strategy 1: Standard XML Body ---
         if isinstance(body, ast.Constant) and isinstance(body.value, str):
+            # Format Output: Use indentation if multi-line
+            if '\n' in body.value:
+                return f"\n    {body.value}\n", 1
             return body.value, 1
 
         if isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or):
@@ -253,6 +274,20 @@ def open_in_editor(file_path, line_no):
 # TUI & List Mode
 # ==========================================
 
+def dump_to_stdout(all_items):
+    """Prints the list to stdout for file redirection."""
+    header = f"{'KEY':<20} | {'LOCATION':<50} | {'XML LINE'}"
+    print(header)
+    print("-" * 150)
+    for i in all_items:
+        # Reconstruct full XML line from parts
+        full_line = f"{i['parts'][0]}{i['val_raw']}{i['parts'][2]}"
+        # Flatten newlines for table display
+        clean_line = " ".join(full_line.split())
+        
+        loc = f"{os.path.basename(i['file_path'])}:{i['line_no']}"
+        print(f"{i['key']:<20} | {loc:<50} | {clean_line}")
+
 def draw_table(stdscr, filtered_items, current_row, scroll_offset, excluded_count, search_query, is_typing_search):
     height, width = stdscr.getmaxyx()
     col_key_w = 15   
@@ -287,11 +322,7 @@ def draw_table(stdscr, filtered_items, current_row, scroll_offset, excluded_coun
             break
 
         item = filtered_items[i]
-        prev_item = filtered_items[i - 1] if i > 0 else None
-        
-        is_new_group = (prev_item is None) or (item['key'] != prev_item['key'])
         is_selected = (i == current_row)
-        
         base_attr = curses.color_pair(2) if is_selected else curses.A_NORMAL
         
         stdscr.attron(base_attr)
@@ -300,13 +331,8 @@ def draw_table(stdscr, filtered_items, current_row, scroll_offset, excluded_coun
         stdscr.attroff(base_attr)
 
         key_text = item['key'][:col_key_w]
-        if is_selected:
-            key_attr = base_attr
-        elif is_new_group:
-            key_attr = curses.color_pair(5) | curses.A_BOLD
-        else:
-            key_attr = curses.A_DIM
-            if i == scroll_offset: key_attr = curses.color_pair(5)
+        if is_selected: key_attr = base_attr
+        else: key_attr = curses.A_DIM
 
         stdscr.addstr(screen_y, 0, f" {key_text:<{col_key_w}} ", key_attr)
         stdscr.addstr(screen_y, col_key_w + 2, "| ", base_attr)
@@ -348,8 +374,7 @@ def draw_table(stdscr, filtered_items, current_row, scroll_offset, excluded_coun
             stdscr.move(screen_y, 0)
             stdscr.clrtoeol()
             
-            # PREVIEW GENERATION
-            # Pass dummy set for preview generation
+            # Preview Logic
             res_data, strategy = process_python_ast(item['val_raw'], used_names_set=set())
             full_text = "Preview Error"
             
@@ -375,24 +400,9 @@ def draw_table(stdscr, filtered_items, current_row, scroll_offset, excluded_coun
                     screen_y += 1
             stdscr.attroff(base_attr)
 
-def dump_to_stdout(all_items):
-    """Prints the list to stdout for file redirection."""
-    header = f"{'KEY':<20} | {'LOCATION':<50} | {'XML LINE'}"
-    print(header)
-    print("-" * 150)
-    for i in all_items:
-        # Reconstruct full XML line from parts
-        full_line = f"{i['parts'][0]}{i['val_raw']}{i['parts'][2]}"
-        # Flatten newlines for table display
-        clean_line = " ".join(full_line.split())
-        
-        loc = f"{os.path.basename(i['file_path'])}:{i['line_no']}"
-        print(f"{i['key']:<20} | {loc:<50} | {clean_line}")
-
 def tui_mode(directory, pattern):
     all_items = []
     
-    # Only print scan message if interactive
     if sys.stdout.isatty():
         print("Scanning files... please wait.")
         
@@ -510,12 +520,10 @@ def process_file_fix(file_path, pattern, dry_run):
 
             if key not in KEY_LIST: continue
 
-            # Determine Strategy (Passing set of used names)
+            # Determine Strategy
             res_data, strategy = process_python_ast(val_raw, file_used_names)
             
             if strategy == 0: continue
-            
-            # Basic check to avoid churn
             if strategy == 1 and res_data == val_raw: continue
 
             replacement = ""
@@ -523,8 +531,6 @@ def process_file_fix(file_path, pattern, dry_run):
             if strategy == 2:
                 # STRATEGY: Extraction (for Dicts/Lists)
                 new_dict, xml_lines = res_data
-                
-                # Prepend the extracted <t t-set> lines
                 extracted_block = "\n".join(xml_lines)
                 main_tag = f'{prefix_attrs} t-value="{new_dict}"{suffix_attrs}/>'
                 replacement = f'{extracted_block}\n{main_tag}'
@@ -537,11 +543,8 @@ def process_file_fix(file_path, pattern, dry_run):
                 files_modified = True
 
             print(f"  - Transforming '{key}'")
-            # Show Old (truncated)
             disp_old = (val_raw[:50] + '..') if len(val_raw) > 50 else val_raw
             print(f"    Old: {disp_old}")
-            
-            # Show New (Full Preview)
             print(f"    New:\n{GREEN}{replacement}{RESET}")
             
             start = m.start()
