@@ -129,6 +129,26 @@ def clean_unparse(node):
     except:
         return ""
 
+def protect_spacing(text):
+    """
+    Encodes leading/trailing spaces to &#160; (numeric nbsp) to survive XML linters.
+    We use &#160; because &nbsp; is not defined in standard XML (only in HTML).
+    """
+    if not text: return text
+    
+    # Escape basic XML chars first
+    text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Replace leading space with Numeric Non-Breaking Space
+    if text.startswith(' '):
+        text = '&#160;' + text[1:]
+    
+    # Replace trailing space with Numeric Non-Breaking Space
+    if text.endswith(' '):
+        text = text[:-1] + '&#160;'
+        
+    return text
+
 def process_python_ast(val_str, used_names_set):
     """
     Returns tuple: (result_data, strategy_type)
@@ -141,20 +161,18 @@ def process_python_ast(val_str, used_names_set):
         s_strip = val_str.strip()
         
         # Case A: Simple String Literal (e.g. 'Line1\nLine2')
-        # We wrap in triple quotes to make it valid Python for ast.parse
         if (s_strip.startswith("'") and s_strip.endswith("'")) or \
            (s_strip.startswith('"') and s_strip.endswith('"')):
             quote = s_strip[0]
             if len(s_strip) >= 2 and s_strip[-1] == quote:
-                 # Strip outer quotes and wrap in triple double-quotes to preserve newlines
                  inner = s_strip[1:-1]
                  val_for_ast = f'"""{inner}"""'
         
-        # Case B: Data Structures (Lists/Dicts) - Newlines are valid, do nothing
+        # Case B: Data Structures (Lists/Dicts)
         elif s_strip.startswith('{') or s_strip.startswith('['):
             pass 
             
-        # Case C: Logic/Math - Flatten newlines to avoid SyntaxErrors
+        # Case C: Logic/Math
         else:
             val_for_ast = val_str.replace('\n', ' ')
 
@@ -170,21 +188,25 @@ def process_python_ast(val_str, used_names_set):
         if transformer.extracted_vars:
             lines = []
             for var_name, text in transformer.extracted_vars:
-                text = text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                text = protect_spacing(text)
                 lines.append(f'<t t-set="{var_name}">{text}</t>')
             
             return (clean_unparse(new_tree), lines), 2
 
         # --- Strategy 1: Standard XML Body ---
         if isinstance(body, ast.Constant) and isinstance(body.value, str):
+            protected_val = protect_spacing(body.value)
+            
             # Format Output: Use indentation if multi-line
             if '\n' in body.value:
-                return f"\n    {body.value}\n", 1
-            return body.value, 1
+                return f"\n    {protected_val}\n", 1
+            return protected_val, 1
 
         if isinstance(body, ast.BoolOp) and isinstance(body.op, ast.Or):
             if isinstance(body.values[-1], ast.Constant) and isinstance(body.values[-1].value, str):
                 string_val = body.values[-1].value
+                string_val = protect_spacing(string_val)
+                
                 if len(body.values) == 2:
                     condition_node = body.values[0]
                 else:
@@ -197,11 +219,11 @@ def process_python_ast(val_str, used_names_set):
         if isinstance(body, ast.IfExp):
             condition_str = clean_unparse(body.test)
             if isinstance(body.body, ast.Constant) and isinstance(body.body.value, str):
-                body_xml = body.body.value
+                body_xml = protect_spacing(body.body.value)
             else:
                 body_xml = f'<t t-esc="{clean_unparse(body.body)}"/>'
             if isinstance(body.orelse, ast.Constant) and isinstance(body.orelse.value, str):
-                orelse_xml = body.orelse.value
+                orelse_xml = protect_spacing(body.orelse.value)
             else:
                 orelse_xml = f'<t t-esc="{clean_unparse(body.orelse)}"/>'
             
@@ -280,9 +302,7 @@ def dump_to_stdout(all_items):
     print(header)
     print("-" * 150)
     for i in all_items:
-        # Reconstruct full XML line from parts
         full_line = f"{i['parts'][0]}{i['val_raw']}{i['parts'][2]}"
-        # Flatten newlines for table display
         clean_line = " ".join(full_line.split())
         
         loc = f"{os.path.basename(i['file_path'])}:{i['line_no']}"
@@ -416,7 +436,6 @@ def tui_mode(directory, pattern):
 
     all_items.sort(key=lambda x: (x['key'], x['file_path'], x['line_no']))
 
-    # CHECK FOR REDIRECTION
     if not sys.stdout.isatty():
         dump_to_stdout(all_items)
         return
@@ -509,7 +528,6 @@ def process_file_fix(file_path, pattern, dry_run):
         files_modified = False
         new_content = content
         
-        # Track used names for the entire file to avoid collisions
         file_used_names = set()
         
         for m in matches_to_replace:
@@ -520,7 +538,6 @@ def process_file_fix(file_path, pattern, dry_run):
 
             if key not in KEY_LIST: continue
 
-            # Determine Strategy
             res_data, strategy = process_python_ast(val_raw, file_used_names)
             
             if strategy == 0: continue
