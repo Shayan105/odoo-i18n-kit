@@ -18,7 +18,7 @@ KEY_LIST = [
     "label", "description", "title", "label_empty", "subtitle", "tooltip_title", 
     "placeholder", "title_content", "alt", "learn_more_text", "button_label", 
     "btn_text", "text", "internal_link_label", "invalid_hint", "submit_label",
-    "base_name", "monthly", "name", "primary_button", "cells", "header", "options"
+    "base_name", "monthly", "primary_button", "cells", "header", "options"
 ] 
 
 # ==========================================
